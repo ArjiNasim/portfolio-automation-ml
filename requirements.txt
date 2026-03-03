@@ -6,3 +6,10 @@ seaborn
 yfinance
 shap
 tensorflow
+
+scipy
+statsmodels
+xgboost
+tqdm
+joblib
+python-dotenv
