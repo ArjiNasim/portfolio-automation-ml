@@ -1,282 +1,151 @@
-"""
-TP1 – Financial Data Collection
+# =============================================================================
+# TP1 — Collecte et préparation des données financières
+# Automated Portfolio Management — Pratique de la Data Science 2024/2025
+# =============================================================================
+# Prérequis : pip install yfinance pandas
+# Outputs   :
+#   - data/ratios_financiers.csv          (41 entreprises × 13 ratios)
+#   - Companies_historical_data/*.csv     (40 historiques de prix sur 5 ans)
+# =============================================================================
 
-In this script we perform two main tasks:
-
-1) Scrape financial ratios for a set of companies using yfinance
-2) Download 5 years of historical stock price data for each company
-
-The outputs are:
-- A CSV file containing financial ratios for all companies
-- One CSV file per company containing historical stock data
-
-This will serve as the raw dataset for the following machine learning steps.
-"""
-
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List
-
-import numpy as np
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import os
+from datetime import datetime, timedelta
 
-
-# ============================================================
-# 1) Define project directories
-# ============================================================
-
-# Root directory of the project
-BASE_DIR = Path(".")
-
-# Directory where raw datasets will be stored
-RAW_DATA_DIR = BASE_DIR / "data" / "raw"
-
-# Directory for historical stock data (one CSV per company)
-HISTORICAL_DATA_DIR = RAW_DATA_DIR / "companies_historical_data"
-
-# Create folders if they do not already exist
-RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-HISTORICAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# ============================================================
-# 2) Define the companies we want to study
-# ============================================================
-
-# Dictionary mapping company names to stock tickers
-companies: Dict[str, str] = {
-    "Apple": "AAPL",
-    "Microsoft": "MSFT",
-    "Amazon": "AMZN",
-    "Alphabet": "GOOGL",
-    "Meta": "META",
-    "Tesla": "TSLA",
-    "NVIDIA": "NVDA",
-    "Samsung": "005930.KS",
-    "Tencent": "TCEHY",
-    "Alibaba": "BABA",
-    "IBM": "IBM",
-    "Intel": "INTC",
-    "Oracle": "ORCL",
-    "Sony": "SONY",
-    "Adobe": "ADBE",
-    "Netflix": "NFLX",
-    "AMD": "AMD",
-    "Qualcomm": "QCOM",
-    "Cisco": "CSCO",
-    "JP Morgan": "JPM",
-    "Goldman Sachs": "GS",
-    "Visa": "V",
-    "Johnson & Johnson": "JNJ",
-    "Pfizer": "PFE",
-    "ExxonMobil": "XOM",
-    "ASML": "ASML.AS",
-    "SAP": "SAP.DE",
-    "Siemens": "SIE.DE",
-    "Louis Vuitton (LVMH)": "MC.PA",
-    "TotalEnergies": "TTE.PA",
-    "Shell": "SHEL.L",
-    "Baidu": "BIDU",
-    "JD.com": "JD",
-    "BYD": "BYDDY",
-    "ICBC": "1398.HK",
-    "Toyota": "TM",
-    "SoftBank": "9984.T",
-    "Nintendo": "NTDOY",
-    "Hyundai": "HYMTF",
-    "Reliance Industries": "RELIANCE.NS",
+# ── Univers d'investissement (41 entreprises, 15 marchés) ─────────────────────
+companies = {
+    "Apple": "AAPL", "Microsoft": "MSFT", "Amazon": "AMZN",
+    "Alphabet": "GOOGL", "Meta": "META", "Tesla": "TSLA",
+    "NVIDIA": "NVDA", "Samsung": "005930.KS", "Tencent": "TCEHY",
+    "Alibaba": "BABA", "IBM": "IBM", "Intel": "INTC",
+    "Oracle": "ORCL", "Sony": "SONY", "Adobe": "ADBE",
+    "Netflix": "NFLX", "AMD": "AMD", "Qualcomm": "QCOM",
+    "Cisco": "CSCO", "JP Morgan": "JPM", "Goldman Sachs": "GS",
+    "Visa": "V", "Johnson & Johnson": "JNJ", "Pfizer": "PFE",
+    "ExxonMobil": "XOM", "ASML": "ASML.AS", "SAP": "SAP.DE",
+    "Siemens": "SIE.DE", "Louis Vuitton (LVMH)": "MC.PA",
+    "TotalEnergies": "TTE.PA", "Shell": "SHEL.L", "Baidu": "BIDU",
+    "JD.com": "JD", "BYD": "BYDDY", "ICBC": "1398.HK",
+    "Toyota": "TM", "SoftBank": "9984.T", "Nintendo": "NTDOY",
+    "Hyundai": "HYMLF", "Reliance Industries": "RELIANCE.NS",
     "Tata Consultancy Services": "TCS.NS",
 }
 
-
-# ============================================================
-# 3) Define financial ratios we want to collect
-# ============================================================
-
-# These ratios will be extracted from yfinance
-ratio_names: List[str] = [
-    "forwardPE",
-    "beta",
-    "priceToBook",
-    "priceToSales",
-    "dividendYield",
-    "trailingEps",
-    "debtToEquity",
-    "currentRatio",
-    "quickRatio",
-    "returnOnEquity",
-    "returnOnAssets",
-    "operatingMargins",
-    "profitMargins",
+# ── 13 ratios financiers à collecter ──────────────────────────────────────────
+RATIO_KEYS = [
+    "forwardPE", "beta", "priceToBook", "priceToSales",
+    "dividendYield", "trailingEps", "debtToEquity",
+    "currentRatio", "quickRatio", "returnOnEquity",
+    "returnOnAssets", "operatingMargins", "profitMargins",
 ]
 
+# ── Fenêtre temporelle : 5 ans d'historique ───────────────────────────────────
+END_DATE   = datetime.now().strftime("%Y-%m-%d")
+START_DATE = (datetime.now() - timedelta(days=5 * 365)).strftime("%Y-%m-%d")
 
-# ============================================================
-# 4) Utility functions
-# ============================================================
+HIST_FOLDER = "Companies_historical_data"
+DATA_FOLDER = "data"
 
-def sanitize_filename(name: str) -> str:
+
+# =============================================================================
+# SECTION 1 — Collecte des ratios financiers
+# =============================================================================
+def collect_financial_ratios(companies, ratio_keys):
     """
-    Convert a company name into a clean filename.
-    This avoids problems with spaces or special characters.
+    Pour chaque entreprise, récupère les 13 ratios financiers via yfinance.
+    Utilise .get(key) pour éviter toute exception si un ratio est manquant.
+    Retourne un DataFrame (41 lignes × 13 colonnes) avec Company en index.
     """
-    return name.replace(" ", "_").replace("(", "").replace(")", "").replace(".", "")
+    ratios = {key: [] for key in ratio_keys}
+    company_names = []
 
+    for name, symbol in companies.items():
+        print(f"  Extraction : {name} ({symbol})...")
+        ticker = yf.Ticker(symbol)
+        info   = ticker.info  # Un seul appel API par entreprise
 
-def safe_get(info: dict, key: str):
-    """
-    Safely retrieve a value from ticker.info.
+        company_names.append(name)
+        for key in ratio_keys:
+            ratios[key].append(info.get(key))  # None si absent, pas d'exception
 
-    If the value does not exist we return NaN instead of raising an error.
-    """
-    value = info.get(key, np.nan)
-    return np.nan if value is None else value
-
-
-# ============================================================
-# 5) Financial ratios scraping
-# ============================================================
-
-def fetch_company_ratios(symbol: str, ratio_list: List[str]) -> Dict[str, float]:
-    """
-    Retrieve financial ratios for one company using yfinance.
-    """
-
-    ticker = yf.Ticker(symbol)
-    info = ticker.info
-
-    ratios = {}
-
-    for ratio in ratio_list:
-        ratios[ratio] = safe_get(info, ratio)
-
-    return ratios
-
-
-def build_ratios_dataframe(
-    companies_dict: Dict[str, str],
-    ratio_list: List[str]
-) -> pd.DataFrame:
-    """
-    Build a dataframe where:
-    - rows = companies
-    - columns = financial ratios
-    """
-
-    data = {}
-
-    for company, ticker in companies_dict.items():
-
-        print(f"Collecting ratios for {company} ({ticker})")
-
-        try:
-            data[company] = fetch_company_ratios(ticker, ratio_list)
-
-        except Exception as e:
-            print(f"Error for {company}: {e}")
-            data[company] = {r: np.nan for r in ratio_list}
-
-    df = pd.DataFrame.from_dict(data, orient="index")
+    df = pd.DataFrame(ratios, index=company_names)
     df.index.name = "Company"
-
     return df
 
 
-# ============================================================
-# 6) Historical price collection
-# ============================================================
-
-def download_price_history(symbol: str, start: str, end: str) -> pd.DataFrame:
+# =============================================================================
+# SECTION 2 — Collecte des historiques de prix (5 ans)
+# =============================================================================
+def collect_price_history(companies, start_date, end_date, folder):
     """
-    Download historical stock prices from Yahoo Finance.
+    Pour chaque entreprise, télécharge 5 ans de cours de clôture ajustés.
+    Crée 3 colonnes : Close, Next Day Close, Rendement.
+    Export CSV dans Companies_historical_data/
     """
+    os.makedirs(folder, exist_ok=True)
+    success, failed = 0, []
 
-    df = yf.download(symbol, start=start, end=end, progress=False)
-
-    if df.empty:
-        return df
-
-    # Keep only the closing price
-    df = df[["Close"]].copy()
-
-    # Create the "Next Day Close" column
-    df["Next Day Close"] = df["Close"].shift(-1)
-
-    # Compute daily return
-    df["Return"] = (df["Next Day Close"] - df["Close"]) / df["Close"]
-
-    return df
-
-
-def save_company_history(
-    df: pd.DataFrame,
-    company_name: str
-):
-    """
-    Save historical price dataframe into a CSV file.
-    """
-
-    filename = sanitize_filename(company_name) + "_historical_data.csv"
-    path = HISTORICAL_DATA_DIR / filename
-
-    df.to_csv(path)
-
-
-# ============================================================
-# 7) Main execution pipeline
-# ============================================================
-
-def main():
-
-    print("Starting financial data collection...")
-
-    # --------------------------------------------------------
-    # Step 1: collect financial ratios
-    # --------------------------------------------------------
-
-    ratios_df = build_ratios_dataframe(companies, ratio_names)
-
-    ratios_output_path = RAW_DATA_DIR / "financial_ratios.csv"
-
-    ratios_df.to_csv(ratios_output_path)
-
-    print("Financial ratios saved.")
-
-    print(ratios_df.head())
-
-    # --------------------------------------------------------
-    # Step 2: collect historical stock data
-    # --------------------------------------------------------
-
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=5 * 365)
-
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
-
-    print("Downloading 5 years of historical stock prices...")
-
-    for company, ticker in companies.items():
-
-        print(f"Downloading {company}")
-
+    for name, symbol in companies.items():
         try:
+            print(f"  Téléchargement : {name} ({symbol})...")
+            df = yf.download(symbol, start=start_date, end=end_date,
+                             auto_adjust=True, progress=False)
 
-            df = download_price_history(ticker, start_str, end_str)
+            if df.empty:
+                print(f"    ⚠️  Données vides pour {name}")
+                failed.append(name)
+                continue
 
-            if not df.empty:
-                save_company_history(df, company)
+            # Correction MultiIndex (bug yfinance récent)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # Construction des 3 colonnes
+            df_hist = df[["Close"]].copy()
+            df_hist["Next Day Close"] = df_hist["Close"].shift(-1)
+            df_hist["Rendement"]      = (df_hist["Next Day Close"] - df_hist["Close"]) / df_hist["Close"]
+
+            # Export CSV avec nom normalisé
+            clean_name = name.replace(" ", "_").replace("&", "and")
+            path = os.path.join(folder, f"{clean_name}_history.csv")
+            df_hist.to_csv(path)
+            print(f"    ✅ {name} → {path}")
+            success += 1
 
         except Exception as e:
-            print(f"Error for {company}: {e}")
+            print(f"    ❌ Erreur sur {name} : {e}")
+            failed.append(name)
 
-    print("TP1 completed successfully.")
+    return success, failed
 
 
-# ============================================================
-# 8) Run script
-# ============================================================
-
+# =============================================================================
+# Lancement
+# =============================================================================
 if __name__ == "__main__":
-    main()
+    print("=" * 60)
+    print("  TP1 — Collecte et préparation des données financières")
+    print("=" * 60)
+
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+
+    # ── 1. Ratios financiers ───────────────────────────────────────────────────
+    print("\n[1/2] Collecte des ratios financiers...")
+    df_ratios = collect_financial_ratios(companies, RATIO_KEYS)
+    ratios_path = os.path.join(DATA_FOLDER, "ratios_financiers.csv")
+    df_ratios.to_csv(ratios_path)
+    print(f"\n  ✅ {len(df_ratios)} entreprises exportées → {ratios_path}")
+    print(f"  Aperçu :\n{df_ratios[['forwardPE','beta','returnOnEquity']].head(5)}")
+
+    # ── 2. Historiques de prix ────────────────────────────────────────────────
+    print(f"\n[2/2] Téléchargement des historiques ({START_DATE} → {END_DATE})...")
+    ok, ko = collect_price_history(companies, START_DATE, END_DATE, HIST_FOLDER)
+    print(f"\n  ✅ {ok} téléchargements réussis")
+    if ko:
+        print(f"  ❌ {len(ko)} échec(s) : {', '.join(ko)}")
+
+    print("\n" + "=" * 60)
+    print(f"  Output 1 : {ratios_path}")
+    print(f"  Output 2 : {HIST_FOLDER}/ ({ok} fichiers CSV)")
+    print("=" * 60)

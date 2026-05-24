@@ -1,783 +1,304 @@
-%%writefile 2_clustering.py
-"""
-TP2 - Clustering Analysis
+# =============================================================================
+# TP2 — Clustering et segmentation de l'univers d'investissement
+# Automated Portfolio Management — Pratique de la Data Science 2024/2025
+# =============================================================================
+# Prérequis : pip install scikit-learn matplotlib scipy numpy pandas
+# Inputs    : data/ratios_financiers.csv + Companies_historical_data/*.csv
+# Outputs   : outputs/clustering_*.png
+# =============================================================================
 
-This script applies several clustering algorithms to the datasets created in TP1.
-
-We study three different clustering problems:
-1) Financial profiles clustering
-2) Risk profiles clustering
-3) Daily returns correlation clustering
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import os
 import glob
-import warnings
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import dendrogram, linkage
-from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
-from sklearn.decomposition import PCA
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
-from sklearn.preprocessing import StandardScaler
+from scipy.cluster.hierarchy import linkage, dendrogram
+
+RATIOS_PATH = "data/ratios_financiers.csv"
+HIST_FOLDER = "Companies_historical_data"
+OUT_DIR     = "outputs"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
-warnings.filterwarnings("ignore")
-
-
-# ============================================================
-# 1) Paths and folders
-# ============================================================
-
-BASE_DIR = Path(".")
-RAW_DATA_DIR = BASE_DIR / "data" / "raw"
-HISTORICAL_DATA_DIR = RAW_DATA_DIR / "companies_historical_data"
-
-OUTPUTS_DIR = BASE_DIR / "outputs" / "clustering"
-FIGURES_DIR = OUTPUTS_DIR / "figures"
-TABLES_DIR = OUTPUTS_DIR / "tables"
-
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-TABLES_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# ============================================================
-# 2) Feature selection
-# ============================================================
-
-FINANCIAL_FEATURES = [
-    "forwardPE",
-    "priceToBook",
-    "priceToSales",
-    "trailingEps",
-    "returnOnEquity",
-    "returnOnAssets",
-    "operatingMargins",
-    "profitMargins",
-]
-
-RISK_FEATURES = [
-    "beta",
-    "debtToEquity",
-    "currentRatio",
-    "quickRatio",
-    "returnOnEquity",
-    "returnOnAssets",
-]
-
-
-# ============================================================
-# 3) Data loading functions
-# ============================================================
-
-def load_financial_ratios(file_path: Path = RAW_DATA_DIR / "financial_ratios.csv") -> pd.DataFrame:
+# =============================================================================
+# MODULE A — Profils financiers (KMeans)
+# =============================================================================
+def preprocess_for_financial_clustering(filepath):
     """
-    Load the financial ratios dataset created in TP1.
+    Charge les ratios financiers, sélectionne les 7 colonnes pertinentes,
+    supprime les entreprises incomplètes (dropna) et standardise (Z-score).
     """
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+    df = pd.read_csv(filepath, index_col=0)
+    cols = ["forwardPE", "beta", "priceToBook", "returnOnEquity",
+            "returnOnAssets", "operatingMargins", "profitMargins"]
+    existing = [c for c in cols if c in df.columns]
+    df_clean = df[existing].dropna()
+    scaler   = StandardScaler()
+    return scaler.fit_transform(df_clean), df_clean
 
-    df = pd.read_csv(file_path, index_col=0)
-    return df
+
+def elbow_method(data, max_k=12, save_path=None):
+    """Méthode du coude : trace l'inertie KMeans pour K=1 à max_k."""
+    inertias = []
+    K_range  = range(1, max_k + 1)
+    for k in K_range:
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        km.fit(data)
+        inertias.append(km.inertia_)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(K_range, inertias, "go-", label="Inertie")
+    ax.set_title("Méthode du Coude")
+    ax.set_xlabel("Nombre de clusters K")
+    ax.set_ylabel("Inertie")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return inertias
 
 
-def find_return_column(df: pd.DataFrame) -> str:
+def do_kmeans_clustering(data_scaled, df_original, n_clusters=5, save_path=None):
     """
-    Detect the name of the return column.
+    Applique KMeans (n_init=10), affiche les profils moyens par cluster
+    et génère la visualisation t-SNE colorée par cluster.
     """
-    possible_columns = ["Return", "Daily Return", "Rendement"]
+    km     = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+    labels = km.fit_predict(data_scaled)
 
-    for col in possible_columns:
-        if col in df.columns:
-            return col
+    df_clust          = df_original.copy()
+    df_clust["Cluster"] = labels
 
-    raise ValueError(f"No return column found. Expected one of: {possible_columns}")
+    print(f"\n--- Profils moyens (K={n_clusters}) ---")
+    print(df_clust.groupby("Cluster").mean().to_string())
+
+    # Visualisation t-SNE
+    perp     = min(30, len(df_original) - 1)
+    tsne     = TSNE(n_components=2, perplexity=perp, random_state=42,
+                    init="pca", learning_rate="auto")
+    tsne_res = tsne.fit_transform(data_scaled)
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sc = ax.scatter(tsne_res[:, 0], tsne_res[:, 1],
+                    c=labels, cmap="viridis", s=100, edgecolors="black")
+    for i, name in enumerate(df_clust.index):
+        ax.annotate(name, (tsne_res[i, 0], tsne_res[i, 1]),
+                    xytext=(5, 5), textcoords="offset points", fontsize=8)
+    plt.colorbar(sc, ax=ax, label="Cluster ID")
+    ax.set_title(f"Visualisation t-SNE des profils financiers (K={n_clusters})")
+    ax.set_xlabel("t-SNE dimension 1")
+    ax.set_ylabel("t-SNE dimension 2")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    return df_clust
 
 
-def load_returns_dataframe(folder_path: Path = HISTORICAL_DATA_DIR) -> pd.DataFrame:
+# =============================================================================
+# MODULE B — Profils de risque (Clustering Hiérarchique Ward)
+# =============================================================================
+def preprocess_for_risk_clustering(filepath):
     """
-    Load all company historical CSV files and build one dataframe
-    containing daily returns for all companies.
+    Sélectionne les 5 variables de risque et standardise.
     """
-    file_paths = glob.glob(str(folder_path / "*.csv"))
+    df       = pd.read_csv(filepath, index_col=0)
+    cols     = ["beta", "debtToEquity", "currentRatio", "quickRatio", "operatingMargins"]
+    existing = [c for c in cols if c in df.columns]
+    df_risk  = df[existing].dropna()
+    scaler   = StandardScaler()
+    return scaler.fit_transform(df_risk), df_risk
 
-    if len(file_paths) == 0:
-        raise FileNotFoundError(f"No historical CSV files found in {folder_path}")
 
+def plot_dendrogram(data_scaled, df_risk, k_manuel=3, save_path=None):
+    """
+    Calcule le dendrogramme Ward et trace la coupe à k_manuel clusters.
+    """
+    linked    = linkage(data_scaled, method="ward")
+    distances = linked[:, 2]
+    threshold = (distances[-k_manuel] + distances[-k_manuel + 1]) / 2
+
+    fig, ax = plt.subplots(figsize=(15, 7))
+    dendrogram(linked, labels=df_risk.index,
+               leaf_rotation=90, leaf_font_size=9,
+               color_threshold=threshold, ax=ax)
+    ax.axhline(y=threshold, color="r", linestyle="--",
+               label=f"Coupe manuelle K={k_manuel}")
+    ax.set_title(f"Analyse Hiérarchique — Profils de Risque (K={k_manuel})")
+    ax.set_ylabel("Distance (Indice de dissimilarité)")
+    ax.legend()
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    # Attribution finale des clusters
+    hc      = AgglomerativeClustering(n_clusters=k_manuel, linkage="ward")
+    labels  = hc.fit_predict(data_scaled)
+    df_risk_final         = df_risk.copy()
+    df_risk_final["Cluster"] = labels
+
+    print(f"\n--- Profils moyens de risque (K={k_manuel}) ---")
+    print(df_risk_final.groupby("Cluster").mean().to_string())
+
+    return df_risk_final, linked
+
+
+# =============================================================================
+# MODULE C — Corrélations des rendements quotidiens
+# =============================================================================
+def preprocess_returns_data(folder_path):
+    """
+    Charge la colonne 'Rendement' de chaque CSV historique.
+    Remplissage des NaN par la moyenne de la colonne (stable pour les corrélations).
+    """
     returns_dict = {}
-
-    for file_path in file_paths:
-        file_path = Path(file_path)
-
-        company_name = file_path.stem.replace("_historical_data", "").replace("_", " ")
-
-        df = pd.read_csv(file_path)
-
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
-            df = df.set_index("Date")
-
-        return_col = find_return_column(df)
-        returns_dict[company_name] = df[return_col]
+    for f in glob.glob(f"{folder_path}/*.csv"):
+        name   = os.path.basename(f).split("_history")[0]
+        df_tmp = pd.read_csv(f, index_col=0)
+        if "Rendement" in df_tmp.columns:
+            returns_dict[name] = df_tmp["Rendement"]
 
     returns_df = pd.DataFrame(returns_dict)
-
-    # Fill missing returns with the median of each column
-    returns_df = returns_df.apply(lambda col: col.fillna(col.median()), axis=0)
-
-    # Remove completely empty columns if any
-    returns_df = returns_df.dropna(axis=1, how="all")
-
-    if returns_df.empty:
-        raise ValueError("The returns dataframe is empty after loading and cleaning.")
-
-    print("Returns dataframe shape:", returns_df.shape)
-
+    returns_df = returns_df.fillna(returns_df.mean())
     return returns_df
 
 
-# ============================================================
-# 4) Preprocessing functions
-# ============================================================
-
-def preprocess_dataset(
-    df: pd.DataFrame,
-    selected_features: List[str],
-    standardize: bool = True,
-    max_missing_ratio: float = 0.80
-) -> Tuple[pd.DataFrame, np.ndarray]:
+def do_correlation_clustering(returns_df, save_path=None):
     """
-    Select relevant variables, handle missing values properly,
-    and standardize the data.
+    Clustering hiérarchique Ward sur la matrice de corrélation des rendements.
     """
-    working_df = df[selected_features].copy()
+    corr   = returns_df.corr()
+    linked = linkage(corr, method="ward")
 
-    print("\nInitial dataset shape:", working_df.shape)
+    fig, ax = plt.subplots(figsize=(15, 8))
+    dendrogram(linked, labels=corr.columns,
+               leaf_rotation=90, leaf_font_size=8, ax=ax)
+    ax.set_title("Clustering par Corrélation des Rendements Quotidiens")
+    ax.set_ylabel("Distance de Ward (Basée sur la Corrélation)")
+    ax.axhline(y=1.5, color="r", linestyle="--")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
-    # Missing ratio by feature
-    missing_ratio = working_df.isna().mean()
+    # Extrait quelques corrélations notables
+    print("\n--- Extrait de la matrice de corrélation ---")
+    print(corr.iloc[:5, :4].round(3).to_string())
 
-    print("Missing value ratio per feature:")
-    print(missing_ratio)
-
-    # Keep columns with acceptable missing ratio
-    kept_columns = missing_ratio[missing_ratio <= max_missing_ratio].index.tolist()
-    working_df = working_df[kept_columns]
-
-    print("Features kept:", kept_columns)
-
-    if working_df.shape[1] == 0:
-        raise ValueError("No feature left after removing columns with too many missing values.")
-
-    # Fill remaining missing values with median
-    for col in working_df.columns:
-        col_median = working_df[col].median()
-
-        # If the whole column is NaN, replace with 0
-        if pd.isna(col_median):
-            col_median = 0.0
-
-        working_df[col] = working_df[col].fillna(col_median)
-
-    # Remove remaining problematic rows if any
-    working_df = working_df.dropna(axis=0)
-
-    print("Final dataset shape after cleaning:", working_df.shape)
-
-    if working_df.empty:
-        raise ValueError("The preprocessed dataframe is empty after cleaning.")
-
-    data = working_df.values
-
-    if standardize:
-        scaler = StandardScaler()
-        data = scaler.fit_transform(data)
-
-    return working_df, data
+    return corr, linked
 
 
-def preprocess_correlation_matrix(returns_df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
+# =============================================================================
+# MODULE D — DBSCAN + Évaluation comparative (Silhouette Scores)
+# =============================================================================
+def find_best_dbscan(data_scaled):
+    """Recherche automatique du premier eps produisant > 2 clusters."""
+    for e in np.linspace(0.01, 3.0, 1000):
+        labels    = DBSCAN(eps=e, min_samples=5).fit_predict(data_scaled)
+        n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+        if n_clusters > 2:
+            print(f"  ✅ eps={e:.2f} → {n_clusters} clusters trouvés")
+            return labels
+    print("  ❌ DBSCAN : aucune configuration valide trouvée")
+    return np.zeros(len(data_scaled))
+
+
+def do_dbscan_clustering(data_scaled, eps=1.2, min_samples=3):
+    """Applique DBSCAN. Les points -1 sont des outliers (bruit)."""
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(data_scaled)
+    n_noise = np.sum(labels == -1)
+    print(f"  DBSCAN : {len(set(labels)) - (1 if -1 in labels else 0)} clusters, "
+          f"{n_noise} outliers")
+    return labels
+
+
+def evaluate_algorithms(data_scaled, n_clusters=3):
     """
-    Build the correlation matrix from the returns dataframe.
+    Compare KMeans, Hierarchical et DBSCAN via le Silhouette Score.
+    Score de -1 (mauvais) à 1 (parfait). NaN si DBSCAN ne converge pas.
     """
-    corr_matrix = returns_df.corr()
-
-    corr_matrix = corr_matrix.dropna(axis=0, how="all").dropna(axis=1, how="all")
-    corr_matrix = corr_matrix.fillna(0)
-
-    scaler = StandardScaler()
-    scaled_corr = scaler.fit_transform(corr_matrix)
-
-    print("\nCorrelation matrix shape:", corr_matrix.shape)
-
-    return corr_matrix, scaled_corr
-
-
-# ============================================================
-# 5) Evaluation helpers
-# ============================================================
-
-def safe_silhouette_score(data: np.ndarray, labels: np.ndarray) -> Optional[float]:
-    """
-    Compute silhouette score only when it is meaningful.
-    """
-    unique_labels = set(labels)
-
-    if -1 in unique_labels:
-        unique_labels = unique_labels - {-1}
-
-    if len(unique_labels) < 2:
-        return None
-
-    try:
-        return float(silhouette_score(data, labels))
-    except Exception:
-        return None
-
-
-def describe_cluster_sizes(labels: np.ndarray) -> Dict[int, int]:
-    """
-    Return the number of observations per cluster.
-    """
-    unique, counts = np.unique(labels, return_counts=True)
-    return {int(k): int(v) for k, v in zip(unique, counts)}
-
-
-def format_silhouette(value: Optional[float]) -> Optional[float]:
-    """
-    Round silhouette score only if it exists.
-    """
-    if value is None:
-        return None
-    return round(value, 4)
-
-
-# ============================================================
-# 6) Visualization functions
-# ============================================================
-
-def plot_elbow_curve(
-    data: np.ndarray,
-    dataset_name: str,
-    k_range: range = range(2, 11),
-    save_path: Optional[Path] = None
-) -> None:
-    """
-    Plot elbow curve for KMeans.
-    """
-    inertias = []
-
-    for k in k_range:
-        model = KMeans(n_clusters=k, random_state=42, n_init=20)
-        model.fit(data)
-        inertias.append(model.inertia_)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(list(k_range), inertias, marker="o")
-    plt.title(f"Elbow Method - {dataset_name}")
-    plt.xlabel("Number of clusters (K)")
-    plt.ylabel("Inertia")
-    plt.grid(True)
-
-    if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
-
-    plt.show()
-
-
-def plot_pca_clusters(
-    data: np.ndarray,
-    labels: np.ndarray,
-    index_labels: List[str],
-    title: str,
-    save_path: Optional[Path] = None
-) -> None:
-    """
-    Project data onto 2 principal components for visualization.
-    """
-    pca = PCA(n_components=2, random_state=42)
-    projected = pca.fit_transform(data)
-
-    plt.figure(figsize=(10, 6))
-    plt.scatter(projected[:, 0], projected[:, 1], c=labels)
-
-    for i, company in enumerate(index_labels):
-        plt.annotate(company, (projected[i, 0], projected[i, 1]), fontsize=8, alpha=0.8)
-
-    plt.title(title)
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.grid(True)
-
-    if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
-
-    plt.show()
-
-
-def plot_tsne_clusters(
-    data: np.ndarray,
-    labels: np.ndarray,
-    index_labels: List[str],
-    title: str,
-    save_path: Optional[Path] = None
-) -> None:
-    """
-    Use t-SNE for a non-linear 2D visualization.
-    """
-    n_samples = data.shape[0]
-    perplexity = min(10, max(2, n_samples - 1))
-
-    tsne = TSNE(
-        n_components=2,
-        random_state=42,
-        perplexity=perplexity,
-        init="pca",
-        learning_rate="auto",
-    )
-    projected = tsne.fit_transform(data)
-
-    plt.figure(figsize=(10, 6))
-    plt.scatter(projected[:, 0], projected[:, 1], c=labels)
-
-    for i, company in enumerate(index_labels):
-        plt.annotate(company, (projected[i, 0], projected[i, 1]), fontsize=8, alpha=0.8)
-
-    plt.title(title)
-    plt.xlabel("t-SNE 1")
-    plt.ylabel("t-SNE 2")
-    plt.grid(True)
-
-    if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
-
-    plt.show()
-
-
-def plot_hierarchical_dendrogram(
-    data: np.ndarray,
-    labels: List[str],
-    title: str,
-    save_path: Optional[Path] = None
-) -> None:
-    """
-    Plot hierarchical clustering dendrogram.
-    """
-    linked = linkage(data, method="ward")
-
-    plt.figure(figsize=(12, 6))
-    dendrogram(linked, labels=labels, leaf_rotation=90)
-    plt.title(title)
-    plt.xlabel("Companies")
-    plt.ylabel("Distance")
-
-    if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
-
-    plt.show()
-
-
-# ============================================================
-# 7) Clustering functions
-# ============================================================
-
-def apply_kmeans(data: np.ndarray, n_clusters: int) -> np.ndarray:
-    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
-    return model.fit_predict(data)
-
-
-def apply_hierarchical_clustering(data: np.ndarray, n_clusters: int) -> np.ndarray:
-    model = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
-    return model.fit_predict(data)
-
-
-def apply_dbscan(data: np.ndarray, eps: float = 1.2, min_samples: int = 3) -> np.ndarray:
-    model = DBSCAN(eps=eps, min_samples=min_samples)
-    return model.fit_predict(data)
-
-
-# ============================================================
-# 8) Cluster interpretation helpers
-# ============================================================
-
-def summarize_clusters(df: pd.DataFrame, labels: np.ndarray) -> pd.DataFrame:
-    """
-    Compute cluster-wise averages for interpretation.
-    """
-    temp_df = df.copy()
-    temp_df["cluster"] = labels
-    summary = temp_df.groupby("cluster").mean(numeric_only=True)
-    return summary
-
-
-def save_cluster_summary(summary_df: pd.DataFrame, file_name: str) -> None:
-    output_path = TABLES_DIR / file_name
-    summary_df.to_csv(output_path)
-
-
-# ============================================================
-# 9) Dataset-specific analyses
-# ============================================================
-
-def run_financial_profiles_analysis(ratios_df: pd.DataFrame) -> List[Dict]:
-    """
-    Financial profiles clustering:
-    main algorithm = KMeans
-    """
-    print("\n" + "=" * 70)
-    print("FINANCIAL PROFILES CLUSTERING")
-    print("=" * 70)
-
-    working_df, data = preprocess_dataset(
-        ratios_df,
-        selected_features=FINANCIAL_FEATURES,
-        standardize=True,
-        max_missing_ratio=0.80,
-    )
-
-    plot_elbow_curve(
-        data,
-        dataset_name="Financial Profiles",
-        save_path=FIGURES_DIR / "financial_profiles_elbow.png",
-    )
-
-    n_clusters = 4
-    results = []
+    results = {}
 
     # KMeans
-    kmeans_labels = apply_kmeans(data, n_clusters=n_clusters)
-    kmeans_score = safe_silhouette_score(data, kmeans_labels)
+    km_labels        = KMeans(n_clusters=n_clusters, n_init=10, random_state=42).fit_predict(data_scaled)
+    results["K-Means"]      = silhouette_score(data_scaled, km_labels)
 
-    kmeans_summary = summarize_clusters(working_df, kmeans_labels)
-    save_cluster_summary(kmeans_summary, "financial_profiles_kmeans_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        kmeans_labels,
-        working_df.index.tolist(),
-        title="Financial Profiles - KMeans (PCA)",
-        save_path=FIGURES_DIR / "financial_profiles_kmeans_pca.png",
-    )
-
-    plot_tsne_clusters(
-        data,
-        kmeans_labels,
-        working_df.index.tolist(),
-        title="Financial Profiles - KMeans (t-SNE)",
-        save_path=FIGURES_DIR / "financial_profiles_kmeans_tsne.png",
-    )
-
-    results.append({
-        "dataset": "financial_profiles",
-        "algorithm": "kmeans",
-        "n_clusters_detected": len(np.unique(kmeans_labels)),
-        "silhouette_score": format_silhouette(kmeans_score),
-        "cluster_sizes": describe_cluster_sizes(kmeans_labels),
-    })
-
-    # Hierarchical
-    hier_labels = apply_hierarchical_clustering(data, n_clusters=n_clusters)
-    hier_score = safe_silhouette_score(data, hier_labels)
-
-    hier_summary = summarize_clusters(working_df, hier_labels)
-    save_cluster_summary(hier_summary, "financial_profiles_hierarchical_summary.csv")
-
-    plot_hierarchical_dendrogram(
-        data,
-        working_df.index.tolist(),
-        title="Financial Profiles - Hierarchical Dendrogram",
-        save_path=FIGURES_DIR / "financial_profiles_hierarchical_dendrogram.png",
-    )
-
-    plot_pca_clusters(
-        data,
-        hier_labels,
-        working_df.index.tolist(),
-        title="Financial Profiles - Hierarchical Clustering (PCA)",
-        save_path=FIGURES_DIR / "financial_profiles_hierarchical_pca.png",
-    )
-
-    results.append({
-        "dataset": "financial_profiles",
-        "algorithm": "hierarchical",
-        "n_clusters_detected": len(np.unique(hier_labels)),
-        "silhouette_score": format_silhouette(hier_score),
-        "cluster_sizes": describe_cluster_sizes(hier_labels),
-    })
+    # Hierarchical Ward
+    hier_labels      = AgglomerativeClustering(n_clusters=n_clusters).fit_predict(data_scaled)
+    results["Hierarchical"] = silhouette_score(data_scaled, hier_labels)
 
     # DBSCAN
-    dbscan_labels = apply_dbscan(data, eps=1.5, min_samples=3)
-    dbscan_score = safe_silhouette_score(data, dbscan_labels)
-
-    dbscan_summary = summarize_clusters(working_df, dbscan_labels)
-    save_cluster_summary(dbscan_summary, "financial_profiles_dbscan_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        dbscan_labels,
-        working_df.index.tolist(),
-        title="Financial Profiles - DBSCAN (PCA)",
-        save_path=FIGURES_DIR / "financial_profiles_dbscan_pca.png",
-    )
-
-    results.append({
-        "dataset": "financial_profiles",
-        "algorithm": "dbscan",
-        "n_clusters_detected": len(set(dbscan_labels)) - (1 if -1 in dbscan_labels else 0),
-        "silhouette_score": format_silhouette(dbscan_score),
-        "cluster_sizes": describe_cluster_sizes(dbscan_labels),
-    })
+    db_labels        = do_dbscan_clustering(data_scaled, eps=1.2, min_samples=3)
+    mask             = db_labels != -1
+    n_valid          = len(set(db_labels[mask]))
+    if n_valid > 1 and np.sum(mask) > n_valid:
+        results["DBSCAN"] = silhouette_score(data_scaled[mask], db_labels[mask])
+    else:
+        results["DBSCAN"] = np.nan
+        print("  ⚠️  DBSCAN : pas assez de clusters valides pour le Silhouette Score")
 
     return results
 
 
-def run_risk_profiles_analysis(ratios_df: pd.DataFrame) -> List[Dict]:
-    """
-    Risk profiles clustering:
-    main algorithm = hierarchical clustering
-    """
-    print("\n" + "=" * 70)
-    print("RISK PROFILES CLUSTERING")
-    print("=" * 70)
-
-    working_df, data = preprocess_dataset(
-        ratios_df,
-        selected_features=RISK_FEATURES,
-        standardize=True,
-        max_missing_ratio=0.80,
-    )
-
-    results = []
-    n_clusters = 4
-
-    # Hierarchical
-    hier_labels = apply_hierarchical_clustering(data, n_clusters=n_clusters)
-    hier_score = safe_silhouette_score(data, hier_labels)
-
-    hier_summary = summarize_clusters(working_df, hier_labels)
-    save_cluster_summary(hier_summary, "risk_profiles_hierarchical_summary.csv")
-
-    plot_hierarchical_dendrogram(
-        data,
-        working_df.index.tolist(),
-        title="Risk Profiles - Hierarchical Dendrogram",
-        save_path=FIGURES_DIR / "risk_profiles_hierarchical_dendrogram.png",
-    )
-
-    plot_pca_clusters(
-        data,
-        hier_labels,
-        working_df.index.tolist(),
-        title="Risk Profiles - Hierarchical Clustering (PCA)",
-        save_path=FIGURES_DIR / "risk_profiles_hierarchical_pca.png",
-    )
-
-    results.append({
-        "dataset": "risk_profiles",
-        "algorithm": "hierarchical",
-        "n_clusters_detected": len(np.unique(hier_labels)),
-        "silhouette_score": format_silhouette(hier_score),
-        "cluster_sizes": describe_cluster_sizes(hier_labels),
-    })
-
-    # KMeans
-    kmeans_labels = apply_kmeans(data, n_clusters=n_clusters)
-    kmeans_score = safe_silhouette_score(data, kmeans_labels)
-
-    kmeans_summary = summarize_clusters(working_df, kmeans_labels)
-    save_cluster_summary(kmeans_summary, "risk_profiles_kmeans_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        kmeans_labels,
-        working_df.index.tolist(),
-        title="Risk Profiles - KMeans (PCA)",
-        save_path=FIGURES_DIR / "risk_profiles_kmeans_pca.png",
-    )
-
-    results.append({
-        "dataset": "risk_profiles",
-        "algorithm": "kmeans",
-        "n_clusters_detected": len(np.unique(kmeans_labels)),
-        "silhouette_score": format_silhouette(kmeans_score),
-        "cluster_sizes": describe_cluster_sizes(kmeans_labels),
-    })
-
-    # DBSCAN
-    dbscan_labels = apply_dbscan(data, eps=1.4, min_samples=3)
-    dbscan_score = safe_silhouette_score(data, dbscan_labels)
-
-    dbscan_summary = summarize_clusters(working_df, dbscan_labels)
-    save_cluster_summary(dbscan_summary, "risk_profiles_dbscan_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        dbscan_labels,
-        working_df.index.tolist(),
-        title="Risk Profiles - DBSCAN (PCA)",
-        save_path=FIGURES_DIR / "risk_profiles_dbscan_pca.png",
-    )
-
-    results.append({
-        "dataset": "risk_profiles",
-        "algorithm": "dbscan",
-        "n_clusters_detected": len(set(dbscan_labels)) - (1 if -1 in dbscan_labels else 0),
-        "silhouette_score": format_silhouette(dbscan_score),
-        "cluster_sizes": describe_cluster_sizes(dbscan_labels),
-    })
-
-    return results
-
-
-def run_returns_correlation_analysis(returns_df: pd.DataFrame) -> List[Dict]:
-    """
-    Daily returns correlation clustering:
-    main algorithm = hierarchical clustering
-    """
-    print("\n" + "=" * 70)
-    print("DAILY RETURNS CORRELATION CLUSTERING")
-    print("=" * 70)
-
-    corr_matrix, data = preprocess_correlation_matrix(returns_df)
-
-    labels_list = corr_matrix.index.tolist()
-    results = []
-    n_clusters = 4
-
-    # Hierarchical
-    hier_labels = apply_hierarchical_clustering(data, n_clusters=n_clusters)
-    hier_score = safe_silhouette_score(data, hier_labels)
-
-    plot_hierarchical_dendrogram(
-        data,
-        labels_list,
-        title="Daily Returns Correlations - Hierarchical Dendrogram",
-        save_path=FIGURES_DIR / "returns_correlation_hierarchical_dendrogram.png",
-    )
-
-    plot_pca_clusters(
-        data,
-        hier_labels,
-        labels_list,
-        title="Daily Returns Correlations - Hierarchical Clustering (PCA)",
-        save_path=FIGURES_DIR / "returns_correlation_hierarchical_pca.png",
-    )
-
-    hier_summary = summarize_clusters(corr_matrix, hier_labels)
-    save_cluster_summary(hier_summary, "returns_correlation_hierarchical_summary.csv")
-
-    results.append({
-        "dataset": "returns_correlation",
-        "algorithm": "hierarchical",
-        "n_clusters_detected": len(np.unique(hier_labels)),
-        "silhouette_score": format_silhouette(hier_score),
-        "cluster_sizes": describe_cluster_sizes(hier_labels),
-    })
-
-    # KMeans
-    kmeans_labels = apply_kmeans(data, n_clusters=n_clusters)
-    kmeans_score = safe_silhouette_score(data, kmeans_labels)
-
-    kmeans_summary = summarize_clusters(corr_matrix, kmeans_labels)
-    save_cluster_summary(kmeans_summary, "returns_correlation_kmeans_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        kmeans_labels,
-        labels_list,
-        title="Daily Returns Correlations - KMeans (PCA)",
-        save_path=FIGURES_DIR / "returns_correlation_kmeans_pca.png",
-    )
-
-    results.append({
-        "dataset": "returns_correlation",
-        "algorithm": "kmeans",
-        "n_clusters_detected": len(np.unique(kmeans_labels)),
-        "silhouette_score": format_silhouette(kmeans_score),
-        "cluster_sizes": describe_cluster_sizes(kmeans_labels),
-    })
-
-    # DBSCAN
-    dbscan_labels = apply_dbscan(data, eps=1.5, min_samples=3)
-    dbscan_score = safe_silhouette_score(data, dbscan_labels)
-
-    dbscan_summary = summarize_clusters(corr_matrix, dbscan_labels)
-    save_cluster_summary(dbscan_summary, "returns_correlation_dbscan_summary.csv")
-
-    plot_pca_clusters(
-        data,
-        dbscan_labels,
-        labels_list,
-        title="Daily Returns Correlations - DBSCAN (PCA)",
-        save_path=FIGURES_DIR / "returns_correlation_dbscan_pca.png",
-    )
-
-    results.append({
-        "dataset": "returns_correlation",
-        "algorithm": "dbscan",
-        "n_clusters_detected": len(set(dbscan_labels)) - (1 if -1 in dbscan_labels else 0),
-        "silhouette_score": format_silhouette(dbscan_score),
-        "cluster_sizes": describe_cluster_sizes(dbscan_labels),
-    })
-
-    return results
-
-
-# ============================================================
-# 10) Global comparison table
-# ============================================================
-
-def build_comparison_table(results: List[Dict]) -> pd.DataFrame:
-    """
-    Convert all clustering results into one comparison dataframe.
-    """
-    comparison_df = pd.DataFrame(results)
-    return comparison_df
-
-
-# ============================================================
-# 11) Main function
-# ============================================================
-
-def main() -> None:
-    """
-    Run the full TP2 clustering pipeline.
-    """
-    print("Loading datasets...")
-
-    ratios_df = load_financial_ratios()
-    returns_df = load_returns_dataframe()
-
-    all_results = []
-
-    all_results.extend(run_financial_profiles_analysis(ratios_df))
-    all_results.extend(run_risk_profiles_analysis(ratios_df))
-    all_results.extend(run_returns_correlation_analysis(returns_df))
-
-    comparison_df = build_comparison_table(all_results)
-
-    comparison_path = TABLES_DIR / "clustering_comparison_table.csv"
-    comparison_df.to_csv(comparison_path, index=False)
-
-    print("\n" + "=" * 70)
-    print("FINAL COMPARISON TABLE")
-    print("=" * 70)
-    print(comparison_df)
-
-    print(f"\nComparison table saved to: {comparison_path}")
-    print("TP2 completed successfully.")
-
-
-# ============================================================
-# 12) Script entry point
-# ============================================================
-
+# =============================================================================
+# Lancement
+# =============================================================================
 if __name__ == "__main__":
-    main()
+    print("=" * 60)
+    print("  TP2 — Clustering et segmentation de l'univers")
+    print("=" * 60)
+
+    # ── Module A : Profils financiers ──────────────────────────────────────────
+    print("\n[A] Profils financiers — KMeans")
+    data_fin, df_fin = preprocess_for_financial_clustering(RATIOS_PATH)
+    elbow_method(data_fin, save_path=f"{OUT_DIR}/clustering_elbow.png")
+    print("  Figure sauvegardée → outputs/clustering_elbow.png")
+    do_kmeans_clustering(data_fin, df_fin, n_clusters=5,
+                         save_path=f"{OUT_DIR}/clustering_tsne_finance.png")
+    print("  Figure sauvegardée → outputs/clustering_tsne_finance.png")
+
+    # ── Module B : Profils de risque ───────────────────────────────────────────
+    print("\n[B] Profils de risque — Hierarchical Ward")
+    data_risk, df_risk = preprocess_for_risk_clustering(RATIOS_PATH)
+    plot_dendrogram(data_risk, df_risk, k_manuel=3,
+                    save_path=f"{OUT_DIR}/clustering_dendro_risk.png")
+    print("  Figure sauvegardée → outputs/clustering_dendro_risk.png")
+
+    # ── Module C : Corrélations des rendements ─────────────────────────────────
+    print("\n[C] Corrélations des rendements quotidiens")
+    returns_df = preprocess_returns_data(HIST_FOLDER)
+    do_correlation_clustering(returns_df,
+                              save_path=f"{OUT_DIR}/clustering_dendro_corr.png")
+    print("  Figure sauvegardée → outputs/clustering_dendro_corr.png")
+
+    # ── Module D : Tableau comparatif Silhouette ───────────────────────────────
+    print("\n[D] Comparaison des algorithmes — Silhouette Scores")
+    corr_matrix = returns_df.corr().values
+
+    datasets = {
+        "Financial Profile": data_fin,
+        "Risk Profile":      data_risk,
+        "Returns Corr":      corr_matrix,
+    }
+    comparison = {}
+    for name, data in datasets.items():
+        comparison[name] = evaluate_algorithms(data, n_clusters=3)
+
+    df_eval = pd.DataFrame(comparison).T
+    print("\n--- TABLEAU COMPARATIF DES SILHOUETTE SCORES ---")
+    print(df_eval.round(4).to_string())
+
+    print("\n" + "=" * 60)
+    print("  ✅ TP2 terminé. Figures dans outputs/")
+    print("=" * 60)
